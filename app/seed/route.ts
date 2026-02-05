@@ -1,10 +1,40 @@
-import bcrypt from 'bcrypt';
-import postgres from 'postgres';
-import { invoices, customers, revenue, users } from '../lib/placeholder-data';
+import bcrypt from "bcrypt";
+import postgres from "postgres";
+import { invoices, customers, revenue, users } from "../lib/placeholder-data";
 
-const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+let sql: any = null;
+
+async function getSql() {
+  if (!sql) {
+    sql = postgres(
+      process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL!,
+      {
+        ssl: "require",
+        idle_timeout: 10,
+      },
+    );
+  }
+  return sql;
+}
+
+async function dropAllTables() {
+  console.log("🗑️ Dropping all tables...");
+  const sql = await getSql();
+
+  const tables = await sql`
+    SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+  `;
+
+  for (const { tablename } of tables) {
+    await sql.unsafe(`DROP TABLE IF EXISTS "${tablename}" CASCADE`);
+    console.log(`  ✓ Dropped table: ${tablename}`);
+  }
+
+  console.log(`✅ Dropped ${tables.length} tables`);
+}
 
 async function seedUsers() {
+  const sql = await getSql();
   await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
   await sql`
     CREATE TABLE IF NOT EXISTS users (
@@ -30,6 +60,7 @@ async function seedUsers() {
 }
 
 async function seedInvoices() {
+  const sql = await getSql();
   await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
 
   await sql`
@@ -56,6 +87,7 @@ async function seedInvoices() {
 }
 
 async function seedCustomers() {
+  const sql = await getSql();
   await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
 
   await sql`
@@ -81,6 +113,7 @@ async function seedCustomers() {
 }
 
 async function seedRevenue() {
+  const sql = await getSql();
   await sql`
     CREATE TABLE IF NOT EXISTS revenue (
       month VARCHAR(4) NOT NULL UNIQUE,
@@ -103,15 +136,27 @@ async function seedRevenue() {
 
 export async function GET() {
   try {
-    const result = await sql.begin((sql) => [
-      seedUsers(),
-      seedCustomers(),
-      seedInvoices(),
-      seedRevenue(),
-    ]);
+    await dropAllTables();
+    await seedUsers();
+    await seedCustomers();
+    await seedInvoices();
+    await seedRevenue();
 
-    return Response.json({ message: 'Database seeded successfully' });
+    if (sql) {
+      await sql.end();
+      sql = null;
+    }
+
+    return Response.json({ message: "Database seeded successfully" });
   } catch (error) {
-    return Response.json({ error }, { status: 500 });
+    console.error("❌ Seed error:", error);
+    if (sql) {
+      await sql.end();
+      sql = null;
+    }
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Unknown error" },
+      { status: 500 },
+    );
   }
 }
