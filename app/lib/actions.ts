@@ -7,16 +7,29 @@ import { redirect } from "next/navigation";
 
 const sql = postgres(process.env.POSTGRES_URL!, { ssl: "require" });
 
+export type State = {
+  errors?: {
+    customerId?: string[];
+    amount?: string[];
+    status?: string[];
+  };
+  message?: string | null;
+};
+
 // ✅ Schema base (como está en BD)
 const InvoiceBaseSchema = z.object({
   id: z.string().uuid(),
-  customerId: z.string().uuid("Must be a valid customer ID"),
+  customerId: z.string({
+    invalid_type_error: "Please select a customer.",
+  }),
   amount: z.coerce
     .number()
-    .gt(0, "Amount must be greater than 0")
-    .finite("Amount must be a valid number")
-    .multipleOf(0.01, "Max 2 decimal places"),
-  status: z.enum(["pending", "paid"]),
+    .gt(0, { message: "Must be greater than 0" })
+    .finite({ message: "Must be valid number" })
+    .multipleOf(0.01, { message: "Max 2 decimals" }),
+  status: z.enum(["pending", "paid"], {
+    invalid_type_error: "Please select an invoice status.",
+  }),
   date: z.string().date(),
 });
 
@@ -32,27 +45,41 @@ const UpdateInvoiceSchema = InvoiceBaseSchema.omit({
   date: true,
 });
 
-export async function createInvoice(formData: FormData) {
-  const { customerId, amount, status } = CreateInvoiceSchema.parse({
+export async function createInvoice(prevState: State, formData: FormData) {
+  const validatedFields = CreateInvoiceSchema.safeParse({
     customerId: formData.get("customerId"),
     amount: formData.get("amount"),
     status: formData.get("status"),
   });
 
-  const amountInCents = Math.round(amount * 100);
+  // If form validation fails, return errors early. Otherwise, continue.
+  if (!validatedFields.success) {
+    return {
+      errors: validatedFields.error.flatten().fieldErrors,
+      message: "Missing Fields. Failed to Create Invoice.",
+    };
+  }
+  // Prepare data for insertion into the database
+  const { customerId, amount, status } = validatedFields.data;
+  const amountInCents = amount * 100;
   const date = new Date().toISOString().split("T")[0];
 
+  // Insert data into the database
   try {
     await sql`
       INSERT INTO invoices (customer_id, amount, status, date)
       VALUES (${customerId}, ${amountInCents}, ${status}, ${date})
     `;
-
-    revalidatePath("/dashboard/invoices");
-    redirect("/dashboard/invoices");
   } catch (error) {
-    throw new Error("Failed to create invoice");
+    // If a database error occurs, return a more specific error.
+    return {
+      message: "Database Error: Failed to Create Invoice.",
+    };
   }
+
+  // Revalidate the cache for the invoices page and redirect the user.
+  revalidatePath("/dashboard/invoices");
+  redirect("/dashboard/invoices");
 }
 
 export async function updateInvoice(id: string, formData: FormData) {
